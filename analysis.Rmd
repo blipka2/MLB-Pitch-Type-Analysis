@@ -1,0 +1,292 @@
+---
+title: "An Analysis of MLB Pitch Types"
+author: "Ben Lipka (blipka2@illinois.edu)"
+date: "Due 12/2/2020"
+output:
+  html_document: 
+    theme: default
+    toc: yes
+---
+
+```{r, setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, fig.align = 'center')
+```
+
+```{r, load-packages, include = FALSE}
+# load packages
+library(Hmisc)
+library(rpart)
+library(ggplot2)
+library(dplyr)
+library(skimr)
+library(caret)
+```
+
+```{r read-data, warning = FALSE, message = FALSE}
+# read subset of data
+pitches_2020_regular = readr::read_csv("data/pitches_2020_regular.csv")
+pitches_2020_missing = readr::read_csv("data/pitches_2020_missing.csv")
+pitches_2020_post = readr::read_csv("data/pitches_2020_post.csv")
+```
+
+***
+
+## Abstract
+
+The aim of this analysis is to use data from MLB games to build a classification model that determines pitch type to create an efficient tool that eliminates the potential of human error. After removing unuseful variables and observations with NAs, both a KNN model and decision tree model were built. The KNN model was found to be more accurate on both the validation data and the testing data, with a final accuracy of approximately 78%. This classification tool has a wide variety of potential applications, from recruiting and scouting to preparing for potential opponents. 
+
+***
+
+## Introduction
+
+In the last few decades the Major League Baseball league has witnessed an explosion in the use of statistical methodology to influence high-pressure executive decisions. Today, decisions and performance evaluation in the MLB is not simply based on instinct or human perception; it is instead backed by a plethora of in depth data analysis. 
+
+One way in which in depth analytics can be utilized in baseball is through pitch classification. Pitches are typically classified based on how the ball is gripped and released, however it is fairly difficult to accurately classify every type of pitch with the human eye. Even baseball experts with a trained eye may struggle to maintain accurate prediction levels in this scenario. 
+
+The goal of this analysis is to develop a classifying model that determines the type of pitch based on a number of factors regarding the speed of a pitch, release of a pitch, and much more. 
+
+This clasifying model could prove to be a powerful tool for both scouting and play evaluation. It could be used to ensure that a player is properly spacing out different types of pitches given the situation they are in, however it can also be used to scout pitch styles of new potential players or even upcoming opponents. The key here is that a model would hopefully be both more efficient and accurate than the human eye.   
+
+***
+
+## Methods
+
+### Data
+
+The data that will be used in this analysis has already been split into training and testing datasets for the purpose of modeling. The training dataset contains 263,110 observations of 25 variables from the 2020 regular MLB season. The testing dataset contains 6727 observations of the same 25 variables from the 2020 MLB post season.
+
+For the sake of technological resources available, the training dataset will be subsetted to 50,000 observations and the testing dataset will be subsetted to about 1500 observations. This is about 1/5th of each original dataset, and is very essential as the machine this analysis is being run on is not capable of calculations on such large datasets. 
+
+```{r}
+pitches_trn <- sample_n(pitches_2020_regular, 50000)
+pitches_tst <- sample_n(pitches_2020_post, 1500)
+```
+
+For the purpose of model selection, the regular season dataset will be split 80/20 into an estimation and validation dataset respectively. Below is an in depth overview of the complete training dataset from the regular season. 
+
+```{r, echo=FALSE}
+est_idx <- sample(nrow(pitches_trn), size=0.8 * nrow(pitches_trn))
+pitches_est <- pitches_trn[est_idx, ]
+pitches_val <- pitches_trn[-est_idx, ]
+
+skim(pitches_trn)
+```
+
+Clearly, there are some variables that will not be especially useful when it comes to building this classification model. For example, player name and game date definitely do not have an impact on the pitch being thrown. Also, the batter and pitcher IDs can be removed. The rest of the variables seem appropriate for our model, however release spin rate and release extension have a bit under a hundred missing observations each. Since that will not have much of an effect on the magnitude of data we are working with, columns with NA values will simply be removed. 
+
+```{r, echo=TRUE}
+drop <- c("player_name", "game_date", "batter", "pitcher")
+
+pitches_trn <- na.omit(pitches_trn[ , -which(names(pitches_trn) %in% drop)])
+pitches_tst <- na.omit(pitches_tst[ , -which(names(pitches_tst) %in% drop)])
+pitches_est <- na.omit(pitches_est[ , -which(names(pitches_est) %in% drop)])
+pitches_val <- na.omit(pitches_val[ , -which(names(pitches_val) %in% drop)])
+```
+
+Finally, stand and p_throws, which relate to the batting position and pitching hand, will be factorized for model usage.
+
+```{r, echo=FALSE}
+pitches_trn$stand <- as.factor(pitches_trn$stand)
+pitches_trn$p_throws <- as.factor(pitches_trn$p_throws)
+pitches_trn$pitch_type <-as.factor(pitches_trn$pitch_type)
+
+pitches_tst$stand <- as.factor(pitches_tst$stand)
+pitches_tst$p_throws <- as.factor(pitches_tst$p_throws)
+pitches_tst$pitch_type <-as.factor(pitches_tst$pitch_type)
+
+pitches_est$stand <- as.factor(pitches_est$stand)
+pitches_est$p_throws <- as.factor(pitches_est$p_throws)
+pitches_est$pitch_type <-as.factor(pitches_est$pitch_type)
+
+pitches_val$stand <- as.factor(pitches_val$stand)
+pitches_val$p_throws <- as.factor(pitches_val$p_throws)
+pitches_val$pitch_type <-as.factor(pitches_val$pitch_type)
+```
+
+This still leaves us with a plethora of data to work with, and will hopefully increase the strength of our model. With our data prepared, we can now move into initial model building efforts. 
+
+### Modeling
+
+As this is a problem of classification, we will be building a few different relevant models: first, a regression model using the k-nearest neighbors model. We will build 3 KNN models, each with a different K value, and compare respective classification rates of each model.  
+```{r, echo=FALSE}
+# knn model list creation
+knn_mod_list <- list(
+  knn_01 <- knnreg(pitch_type ~ ., data = pitches_est, k = 1),
+  knn_10 <- knnreg(pitch_type ~ ., data = pitches_est, k = 10),
+  knn_25 <- knnreg(pitch_type ~ ., data = pitches_est, k = 25)
+)
+
+# predictions
+pred_01 <- predict(knn_01, pitches_val, type="class")
+pred_10 <- predict(knn_10, pitches_val, type="class")
+pred_25 <- predict(knn_25, pitches_val, type="class")
+
+# round & assemble prediction dataframe
+pred_10 <- round(pred_10)
+pred_25 <- round(pred_25)
+
+knn_preds <- as.data.frame(pred_01)
+knn_preds$pred_10 <- pred_10
+knn_preds$pred_25 <- pred_25
+knn_preds$actual <- pitches_val$pitch_type
+
+knn_preds$actual = dplyr::case_when(
+  knn_preds$actual == "CH" ~ "1",
+  knn_preds$actual == "CU" ~ "2",
+  knn_preds$actual == "FC" ~ "3",
+  knn_preds$actual == "FF" ~ "4",
+  knn_preds$actual == "FS" ~ "5",
+  knn_preds$actual == "SI" ~ "6",
+  knn_preds$actual == "SL" ~ "7",
+)
+
+# calc accuracy function
+calc_acc <- function(actual, predicted) {
+  1-mean(actual != predicted)
+}
+```
+
+```{r, ECHO = TRUE}
+calc_acc(knn_preds$actual, knn_preds$pred_01)
+calc_acc(knn_preds$actual, knn_preds$pred_10)
+calc_acc(knn_preds$actual, knn_preds$pred_25)
+```
+
+Above is the classification rate of KNN models with k values of 1, 10, and 25 respectively. As seen, the model where k is 1 outperforms the other models by quite a large margin. So, we currently have a model that can correctly predict 76.78% of pitches in our validation dataset. Although this is not a bad prediction rate, there definitely may be other models that can outperform this.
+
+Next, we will build a decision tree using the rpart library and compare that to our KNN model. 
+
+```{r, echo=TRUE}
+tree_mod <- rpart(pitch_type ~ ., data = pitches_est) 
+tree_preds <- as.data.frame(predict(tree_mod, pitches_val, type="class"))
+tree_preds$actual <- pitches_val$pitch_type
+
+calc_acc(tree_preds$`predict(tree_mod, pitches_val, type = "class")`, tree_preds$actual)
+```
+
+As seen, the decision tree model performs just a bit worse at 74.18% accuracy. So, they are in similar ranges of accuracy. 
+
+However, as seen below in the first table the decision tree model performs quite strangely, completely disregarding cutters and splitters. The second table, which is our KNN model, is a lot more accurate across the board.
+
+Finally, the two models resulting predictions were combined to see if accuracy would increase. This was done by taking the KNN predictions and replacing observations where the tree model predicted a changeup, as the tree model predicted changeups best. This only resulted in a model with 75.7% accuracy, which was actually worse than just the KNN model alone.
+
+```{r, echo=FALSE}
+table(tree_preds$`predict(tree_mod, pitches_val, type = "class")`)
+table(knn_preds$pred_01)
+```
+
+```{r, echo=FALSE}
+final_preds <- as.data.frame(knn_preds$pred_01)
+final_preds$tree_preds <- tree_preds$`predict(tree_mod, pitches_val, type = "class")`
+final_preds$combined_preds <- final_preds$`knn_preds$pred_01`
+
+for (row in 1:nrow(final_preds)) {
+  if (final_preds[row, "tree_preds"] == "CH") {
+    final_preds[row, "combined_preds"] <- "CH"
+  }
+}
+
+final_preds$`knn_preds$pred_01` = dplyr::case_when(
+  final_preds$`knn_preds$pred_01` == "1" ~ "CH",
+  final_preds$`knn_preds$pred_01` == "2" ~ "CU",
+  final_preds$`knn_preds$pred_01` == "3" ~ "FC",
+  final_preds$`knn_preds$pred_01` == "4" ~ "FF",
+  final_preds$`knn_preds$pred_01` == "5" ~ "FS",
+  final_preds$`knn_preds$pred_01` == "6" ~ "SI",
+  final_preds$`knn_preds$pred_01` == "7" ~ "SL",
+)
+
+final_preds$actual <- tree_preds$actual
+
+calc_acc(final_preds$actual, final_preds$combined_preds)
+```
+
+So, it appears that the KNN model is clearly the best model to use. The difference in accuracy is a bit marginal, but the fact that the decision tree model misses some types of pitches entirely definitely makes the decision easier. 
+
+***
+
+## Results
+
+Now that we have decided to use the KNN model, it is time to build it with our entire training dataset and see how it performs on the testing data. 
+
+```{r, echo=TRUE}
+knn_mod <- knnreg(pitch_type ~ ., data = pitches_trn, k = 1)
+
+pred_knn <- predict(knn_mod, pitches_tst, type="class")
+
+knn_preds <- as.data.frame(pred_knn)
+knn_preds$actual <- pitches_tst$pitch_type
+
+knn_preds$actual = dplyr::case_when(
+  knn_preds$actual == "CH" ~ "1",
+  knn_preds$actual == "CU" ~ "2",
+  knn_preds$actual == "FC" ~ "3",
+  knn_preds$actual == "FF" ~ "4",
+  knn_preds$actual == "FS" ~ "5",
+  knn_preds$actual == "SI" ~ "6",
+  knn_preds$actual == "SL" ~ "7",
+)
+
+calc_acc(knn_preds$pred_knn, knn_preds$actual)
+
+```
+
+As seen above, our KNN model fitted with the training dataset at k equals 1 performs slightly better on the testing data. We have a final accuracy rate of approximately 77.9%. 
+***
+
+## Discussion
+
+The purpose of this analysis was to develop a classification model that could accurately and systematically determine what type of pitch was thrown based on simple statistics mostly based around how the pitch was released, where it ended up, and how fast it went. In the end, a KNN model was made with approximately 78% accuracy. 
+
+Although this model could certainly strengthen if we instead analyzed video of pitches, this model is certainly useful for many reasons.
+
+This classification tool can be used for baseball recruitment and opponent assessment to form a basis of pitcher's habits and strategies.
+
+For example, if an opposing pitcher had just thrown 2 changeups and we have noticed through the use of this model that this specific pitcher typically follows up back to back changeups with a four seam fastball, we could signal our batter to know what to expect. 
+
+This model also has applications for recruiting. Applying this model to a pitcher can provide a very full assessment of a pitchers toolkit (ie. what pitches they are comfortable and successful with). 
+
+This model, at 78% accurate, can prove to be an extremely powerful tool for individuals performing analysis for Major League Baseball teams. 
+
+***
+
+## Appendix
+
+### Types of pitches:
+
+- `CH` changeup
+- `CU` curveball (also contains pitches originally labeled `CS` and `KC`)
+- `FF` four seam fastball
+- `FC` cutter
+- `FS` splitter (also contains pitches originally labeled `FO`)
+- `SI` sinker
+- `SL` slider
+- `null` no pitch type recorded
+
+### Variable overview: 
+
+- `pitch_type` The type of pitch
+- `game_date` date of the game
+- `release_speed` pitch velocities
+- `release_pos_x` horizontal release position
+- `release_pos_z` vertical release position
+- `release_pos_y` release position of pitch from catcher's perspective
+- `zone` zone location of the ball when it crosses the plate from catcher's perspective
+- `stand` side of the plate batter is standing
+- `p_throws` hand pitcher throws with
+- `player_name` name of player
+- `pfx_x` horizontal movement in feet
+- `pfx_z` vertical movement in feet
+- `plate_x` horizontal position of ball when it crosses home plate
+- `plate_z` vertical position of ball when it crosses home plate
+- `vx0` velocity of pitch in x dimension
+- `vy0` velocity of pitch in y dimension
+- `vz0` velocity of pitch in z dimension
+- `ax` acceleration of pitch in x dimension
+- `ay` acceleration of pitch in y dimension
+- `az` acceleration of pitch in z dimension
+- `effective_speed` derived speed based on the extension of the pitcher's release
+- `release_spin_rate` spin rate of pitch
+- `release_extension`
+- `batter` batter id
+- `pitcher` pitcher id
